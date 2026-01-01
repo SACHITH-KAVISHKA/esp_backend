@@ -4,32 +4,47 @@ import joblib
 import requests
 import datetime
 import math
+import os
 from functools import lru_cache
 import logging
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # LOAD MODEL
-model = joblib.load("lightgbm_safe_speed_model.pkl")
-label_encoders = joblib.load("label_encoders.pkl")
+model_path = "lightgbm_safe_speed_model.pkl"
+encoders_path = "label_encoders.pkl"
+
+if not os.path.exists(model_path):
+    logger.error(f"Model file not found: {model_path}")
+    raise FileNotFoundError(f"Required model file '{model_path}' is missing. Please ensure the model file exists.")
+
+if not os.path.exists(encoders_path):
+    logger.error(f"Label encoders file not found: {encoders_path}")
+    raise FileNotFoundError(f"Required file '{encoders_path}' is missing. Please ensure the label encoders file exists.")
+
+model = joblib.load(model_path)
+label_encoders = joblib.load(encoders_path)
+logger.info("Model and label encoders loaded successfully")
 
 app = Flask(__name__)
 
-OPENWEATHER_API_KEY = "3864ebcddc22960f45e9a5abf09d137c"
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+if not OPENWEATHER_API_KEY:
+    logger.warning("OPENWEATHER_API_KEY not set in environment variables. Weather features will use fallback values.")
+    OPENWEATHER_API_KEY = ""
 
 # ROUTE ENDPOINT COORDS
-KADUWELA = (6.9340, 79.9840)
-KOLLUPITIYA = (6.9100, 79.8520)
+KADUWELA = (6.936372181, 79.98325019)
+KOLLUPITIYA = (6.91145983, 79.86845281)
 
 # store trip start per vehicle
-# WARNING: This is not production-ready. In multi-worker environments (Gunicorn, uWSGI),
-# use Redis or similar external store for shared state across workers.
 trip_start_location = {}
-
-# HELPERS
-
 
 def haversine_distance(coord1, coord2):
     
@@ -60,10 +75,6 @@ def determine_direction(vehicle_id, lat, lon):
 
 @lru_cache(maxsize=256)
 def reverse_geocode_cached(lat_rounded, lon_rounded):
-    """Cached reverse geocoding to reduce API calls.
-    WARNING: Nominatim has strict usage policies. High-frequency calls will result in IP ban.
-    Consider using a local geocoding database or map matching for production.
-    """
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat_rounded}&lon={lon_rounded}&format=json"
         headers = {"User-Agent": "SafeSpeedSystem/1.0"}
@@ -91,7 +102,6 @@ def reverse_geocode_cached(lat_rounded, lon_rounded):
 
 
 def reverse_geocode(lat, lon):
-    """Wrapper that rounds coordinates for caching (approx 1.1km precision)."""
     lat_rounded = round(lat, 2)
     lon_rounded = round(lon, 2)
     return reverse_geocode_cached(lat_rounded, lon_rounded)
@@ -99,10 +109,6 @@ def reverse_geocode(lat, lon):
 
 @lru_cache(maxsize=128)
 def get_weather_cached(lat_rounded, lon_rounded):
-    """Cached weather data to reduce API calls and respect rate limits.
-    Cache is based on rounded coordinates (approx 1.1km precision).
-    Weather doesn't change significantly in small areas or short time periods.
-    """
     try:
         url = (
             "https://api.openweathermap.org/data/2.5/weather"
@@ -133,7 +139,6 @@ def get_weather_cached(lat_rounded, lon_rounded):
 
 
 def get_weather(lat, lon):
-    """Wrapper that rounds coordinates for caching."""
     lat_rounded = round(lat, 2)
     lon_rounded = round(lon, 2)
     return get_weather_cached(lat_rounded, lon_rounded)
@@ -165,7 +170,7 @@ def predict():
 
         # Validate required fields
         required_fields = ["vehicle_id", "route_id", "gps_latitude", "gps_longitude",
-                           "passenger_count", "passenger_load_kg"]
+                        "passenger_count", "passenger_load_kg"]
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
@@ -177,17 +182,16 @@ def predict():
         passenger_count = data["passenger_count"]
         passenger_load_kg = data["passenger_load_kg"]
 
-        # -------- AUTO DIRECTION --------
         direction = determine_direction(vehicle_id, lat, lon)
 
-        # -------- LOCATION & WEATHER --------
+        # LOCATION & WEATHER
         location_name = reverse_geocode(lat, lon)
         temp, humidity, rain_mm = get_weather(lat, lon)
 
         rain_intensity = map_rain_intensity(rain_mm)
         road_condition = infer_road_condition(rain_intensity, humidity)
 
-        # -------- TIME FEATURES --------
+        # TIME FEATURES
         now = datetime.datetime.now()
         hour = now.hour
         day = now.weekday()
@@ -197,7 +201,7 @@ def predict():
         is_peak = 1 if (7 <= hour <= 9 or 16 <= hour <= 19) else 0
         season = 0 if month in [12, 1, 2] else 1
 
-        # -------- DATAFRAME --------
+        # DATAFRAME
         df = pd.DataFrame([{
             "vehicle_id": vehicle_id,
             "route_id": route_id,

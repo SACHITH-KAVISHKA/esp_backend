@@ -31,7 +31,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # MongoDB Configuration
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://sachithkavishka24_db_user:9AreY8oheuYOFpjZ@cluster0.it8iznp.mongodb.net/?appName=Cluster0")
+MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "bus_fleet_db")
 
 try:

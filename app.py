@@ -1,31 +1,25 @@
-"""
-Smart Bus Safe Speed Prediction & Fleet Management System
-Backend API Server with MongoDB Integration
-"""
-
 # Monkey patch for eventlet MUST be at the very top before any other imports
+from pymongo.server_api import ServerApi
+import certifi
+import json
+from bson import ObjectId
+from dotenv import load_dotenv
+from functools import lru_cache
+import logging
+import ssl
+import os
+import math
+import requests
+import joblib
+import pandas as pd
+from datetime import datetime, timedelta
+from pymongo import MongoClient
+from flask_socketio import SocketIO, emit
+from flask_cors import CORS
+from flask import Flask, request, jsonify
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from flask_socketio import SocketIO, emit
-from pymongo import MongoClient
-from datetime import datetime, timedelta
-import pandas as pd
-import joblib
-import requests
-import math
-import os
-import ssl
-import logging
-from functools import lru_cache
-from dotenv import load_dotenv
-from bson import ObjectId
-import json
-import certifi
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
 
 load_dotenv()
 
@@ -37,11 +31,10 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
-# Use eventlet for production deployment with Gunicorn
-# eventlet workers are compatible with WebSockets and long-lived connections
+
 socketio = SocketIO(
-    app, 
-    cors_allowed_origins="*", 
+    app,
+    cors_allowed_origins="*",
     async_mode='eventlet',
     ping_timeout=120,
     ping_interval=25,
@@ -49,7 +42,7 @@ socketio = SocketIO(
     engineio_logger=False
 )
 
-# MongoDB Configuration
+# MongoDB connection
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "bus_speed_predict_api")
 
@@ -60,9 +53,9 @@ try:
         serverSelectionTimeoutMS=60000,
         connectTimeoutMS=60000,
         socketTimeoutMS=60000,
-        server_api=ServerApi('1')  # Modern API version
+        server_api=ServerApi('1')
     )
-    client.server_info()  # Test connection
+    client.server_info()
     db = client[DB_NAME]
     telemetry_collection = db["telemetry"]
     buses_collection = db["buses"]
@@ -105,14 +98,8 @@ ROUTE_ENDPOINTS = {
 # Store trip start per vehicle (in-memory, could be moved to Redis)
 trip_start_location = {}
 
-# ========================
-# HELPER FUNCTIONS
-# ========================
-
-
 def haversine_distance(coord1, coord2):
-    """Calculate distance between two GPS coordinates in km"""
-    R = 6371  # Earth radius in km
+    R = 6371
     lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
     lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
 
@@ -124,9 +111,8 @@ def haversine_distance(coord1, coord2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
-
+# Determine direction based on trip start location
 def determine_direction(vehicle_id, lat, lon, route_id="177_Kaduwela_Kollupitiya"):
-    """Determine travel direction based on trip start location"""
     if vehicle_id not in trip_start_location:
         trip_start_location[vehicle_id] = (lat, lon)
 
@@ -140,9 +126,9 @@ def determine_direction(vehicle_id, lat, lon, route_id="177_Kaduwela_Kollupitiya
         return "Kollupitiya_to_Kaduwela"
 
 
+# get location name from lat/lon with caching
 @lru_cache(maxsize=256)
 def reverse_geocode_cached(lat_rounded, lon_rounded):
-    """Reverse geocode GPS coordinates to location name (cached)"""
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat_rounded}&lon={lon_rounded}&format=json"
         headers = {"User-Agent": "SmartBusFleetSystem/1.0"}
@@ -162,17 +148,14 @@ def reverse_geocode_cached(lat_rounded, lon_rounded):
         logger.warning(f"Geocoding error: {e}")
         return "Unknown"
 
-
 def reverse_geocode(lat, lon):
-    """Reverse geocode with rounding for cache efficiency"""
     lat_rounded = round(lat, 3)
     lon_rounded = round(lon, 3)
     return reverse_geocode_cached(lat_rounded, lon_rounded)
 
-
+# Get weather data from OpenWeatherMap
 @lru_cache(maxsize=128)
 def get_weather_cached(lat_rounded, lon_rounded):
-    """Get weather data from OpenWeatherMap (cached)"""
     if not OPENWEATHER_API_KEY:
         return 30.0, 75.0, 0.0
 
@@ -196,14 +179,12 @@ def get_weather_cached(lat_rounded, lon_rounded):
 
 
 def get_weather(lat, lon):
-    """Get weather with rounding for cache efficiency"""
     lat_rounded = round(lat, 2)
     lon_rounded = round(lon, 2)
     return get_weather_cached(lat_rounded, lon_rounded)
 
-
+# Map rain in mm to intensity
 def map_rain_intensity(rain_mm):
-    """Map rain mm to intensity levels"""
     if rain_mm == 0:
         return 0
     elif rain_mm < 2:
@@ -211,19 +192,16 @@ def map_rain_intensity(rain_mm):
     else:
         return 2
 
-
+# Infer road condition from rain intensity and humidity
 def infer_road_condition(rain_intensity, humidity):
-    """Infer road condition from weather data"""
     return 1 if (rain_intensity > 0 or humidity >= 80) else 0
 
-
+# Get road condition label
 def get_road_condition_label(condition):
-    """Convert road condition code to label"""
     return "Wet" if condition == 1 else "Dry"
 
-
+# Safe encoding
 def safe_encode(col, value):
-    """Safely encode categorical values"""
     if label_encoders is None:
         return 0
     enc = label_encoders.get(col)
@@ -233,30 +211,19 @@ def safe_encode(col, value):
 
 
 def json_serializer(obj):
-    """Custom JSON serializer for MongoDB ObjectId and datetime"""
     if isinstance(obj, ObjectId):
         return str(obj)
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
-
-# ========================
 # ESP32 API ENDPOINTS
-# ========================
-
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Main prediction endpoint for ESP32 devices
-    Receives minimal telemetry, derives additional features, and returns safe speed
-    """
     try:
         data = request.json
-
-        # Validate required fields
         required_fields = ["vehicle_id", "route_id", "gps_latitude", "gps_longitude",
-                           "passenger_count", "passenger_load_kg"]
+                        "passenger_count", "passenger_load_kg"]
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
@@ -324,7 +291,7 @@ def predict():
         if model is not None:
             safe_speed = float(model.predict(df)[0])
         else:
-            safe_speed = 40.0  # Default fallback
+            safe_speed = 40.0  # default speed if model not available
 
         safe_speed = round(safe_speed, 1)
 
@@ -339,7 +306,6 @@ def predict():
         }
 
         # Return response immediately to ESP32
-        # Database operations are done in background thread to avoid blocking
         if db is not None:
             timestamp = now
 
@@ -361,7 +327,6 @@ def predict():
                 "status": "online"
             }
 
-            # Use background thread for database operations to not block ESP32 response
             def store_data():
                 try:
                     buses_collection.update_one(
@@ -377,13 +342,11 @@ def predict():
                     }
                     telemetry_collection.insert_one(telemetry_data)
 
-                    # Emit WebSocket event for real-time updates
                     socketio.emit('bus_update', json.loads(
                         json.dumps(bus_data, default=json_serializer)))
                 except Exception as e:
                     logger.error(f"Background DB operation error: {e}")
-            
-            # Execute in background thread
+
             import threading
             threading.Thread(target=store_data, daemon=True).start()
 
@@ -402,10 +365,7 @@ def reset_trip(vehicle_id):
     return jsonify({"message": f"Trip reset for {vehicle_id}"})
 
 
-# ========================
 # FLEET MANAGEMENT API ENDPOINTS
-# ========================
-
 @app.route("/api/fleet/overview", methods=["GET"])
 def fleet_overview():
     """Get fleet overview statistics"""
@@ -693,34 +653,25 @@ def get_statistics():
         return jsonify({"error": "Failed to fetch statistics"}), 500
 
 
-# ========================
 # WEBSOCKET EVENTS
-# ========================
-
 @socketio.on('connect')
 def handle_connect():
-    """Handle client connection"""
     logger.info("Client connected to WebSocket")
     emit('connected', {'message': 'Connected to Smart Bus Fleet System'})
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    """Handle client disconnection"""
     logger.info("Client disconnected from WebSocket")
 
 
 @socketio.on('subscribe_updates')
 def handle_subscribe():
-    """Subscribe to real-time bus updates"""
     logger.info("Client subscribed to bus updates")
     emit('subscribed', {'message': 'Subscribed to real-time updates'})
 
 
-# ========================
 # HEALTH & STATUS ENDPOINTS
-# ========================
-
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
@@ -758,12 +709,7 @@ def home():
     })
 
 
-# ========================
 # MAIN
-# ========================
-
 if __name__ == "__main__":
     logger.info("Starting Smart Bus Fleet Management System...")
-    # Use eventlet for production deployment with Gunicorn
-    # For production, use: gunicorn --worker-class eventlet -w 1 app:app
     socketio.run(app, host="0.0.0.0", port=5000, debug=False)

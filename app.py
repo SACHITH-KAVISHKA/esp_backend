@@ -32,7 +32,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = os.getenv("DB_NAME", "bus_fleet_db")
+DB_NAME = os.getenv("DB_NAME", "bus_speed_predict_api")
 
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)

@@ -13,6 +13,7 @@ import joblib
 import requests
 import math
 import os
+import ssl
 import logging
 from functools import lru_cache
 from dotenv import load_dotenv
@@ -36,10 +37,12 @@ DB_NAME = os.getenv("DB_NAME", "bus_speed_predict_api")
 
 try:
     mongo_client = MongoClient(
-        MONGO_URI, 
-        serverSelectionTimeoutMS=5000,
-        tls=True,
-        tlsAllowInvalidCertificates=True
+        MONGO_URI,
+        serverSelectionTimeoutMS=30000,
+        connectTimeoutMS=30000,
+        socketTimeoutMS=30000,
+        tlsCAFile=None,
+        ssl_cert_reqs=ssl.CERT_NONE
     )
     mongo_client.server_info()  # Test connection
     db = mongo_client[DB_NAME]

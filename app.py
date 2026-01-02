@@ -19,11 +19,15 @@ from functools import lru_cache
 from dotenv import load_dotenv
 from bson import ObjectId
 import json
+import certifi
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
@@ -36,15 +40,16 @@ MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "bus_speed_predict_api")
 
 try:
-    mongo_client = MongoClient(
+    client = MongoClient(
         MONGO_URI,
-        serverSelectionTimeoutMS=30000,
-        connectTimeoutMS=30000,
-        socketTimeoutMS=30000,
-        tlsAllowInvalidCertificates=True
+        tlsCAFile=certifi.where(),
+        serverSelectionTimeoutMS=60000,
+        connectTimeoutMS=60000,
+        socketTimeoutMS=60000,
+        server_api=ServerApi('1')  # Modern API version
     )
-    mongo_client.server_info()  # Test connection
-    db = mongo_client[DB_NAME]
+    client.server_info()  # Test connection
+    db = client[DB_NAME]
     telemetry_collection = db["telemetry"]
     buses_collection = db["buses"]
     predictions_collection = db["predictions"]
@@ -61,8 +66,9 @@ try:
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
     if not os.path.exists(encoders_path):
-        raise FileNotFoundError(f"Label encoders file not found: {encoders_path}")
-    
+        raise FileNotFoundError(
+            f"Label encoders file not found: {encoders_path}")
+
     model = joblib.load(model_path)
     label_encoders = joblib.load(encoders_path)
     logger.info("Model and label encoders loaded successfully")
@@ -89,16 +95,18 @@ trip_start_location = {}
 # HELPER FUNCTIONS
 # ========================
 
+
 def haversine_distance(coord1, coord2):
     """Calculate distance between two GPS coordinates in km"""
     R = 6371  # Earth radius in km
     lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
     lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
-    
+
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * \
+        math.cos(lat2) * math.sin(dlon/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
@@ -107,10 +115,11 @@ def determine_direction(vehicle_id, lat, lon, route_id="177_Kaduwela_Kollupitiya
     """Determine travel direction based on trip start location"""
     if vehicle_id not in trip_start_location:
         trip_start_location[vehicle_id] = (lat, lon)
-    
+
     start = trip_start_location[vehicle_id]
-    endpoints = ROUTE_ENDPOINTS.get(route_id, ROUTE_ENDPOINTS["177_Kaduwela_Kollupitiya"])
-    
+    endpoints = ROUTE_ENDPOINTS.get(
+        route_id, ROUTE_ENDPOINTS["177_Kaduwela_Kollupitiya"])
+
     if haversine_distance(start, endpoints["start"]) < haversine_distance(start, endpoints["end"]):
         return "Kaduwela_to_Kollupitiya"
     else:
@@ -152,7 +161,7 @@ def get_weather_cached(lat_rounded, lon_rounded):
     """Get weather data from OpenWeatherMap (cached)"""
     if not OPENWEATHER_API_KEY:
         return 30.0, 75.0, 0.0
-    
+
     try:
         url = (
             "https://api.openweathermap.org/data/2.5/weather"
@@ -161,11 +170,11 @@ def get_weather_cached(lat_rounded, lon_rounded):
         r = requests.get(url, timeout=5)
         r.raise_for_status()
         data = r.json()
-        
+
         temp = data["main"]["temp"]
         humidity = data["main"]["humidity"]
         rain_mm = data.get("rain", {}).get("1h", 0)
-        
+
         return temp, humidity, rain_mm
     except Exception as e:
         logger.warning(f"Weather API error: {e}")
@@ -230,42 +239,42 @@ def predict():
     """
     try:
         data = request.json
-        
+
         # Validate required fields
         required_fields = ["vehicle_id", "route_id", "gps_latitude", "gps_longitude",
-                          "passenger_count", "passenger_load_kg"]
+                           "passenger_count", "passenger_load_kg"]
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
-        
+
         vehicle_id = data["vehicle_id"]
         route_id = data["route_id"]
         lat = float(data["gps_latitude"])
         lon = float(data["gps_longitude"])
         passenger_count = int(data["passenger_count"])
         passenger_load_kg = float(data["passenger_load_kg"])
-        
+
         # Derive direction
         direction = determine_direction(vehicle_id, lat, lon, route_id)
-        
+
         # Get location and weather
         location_name = reverse_geocode(lat, lon)
         temp, humidity, rain_mm = get_weather(lat, lon)
-        
+
         rain_intensity = map_rain_intensity(rain_mm)
         road_condition = infer_road_condition(rain_intensity, humidity)
         road_condition_label = get_road_condition_label(road_condition)
-        
+
         # Time features
         now = datetime.now()
         hour = now.hour
         day = now.weekday()
         month = now.month
-        
+
         is_weekend = 1 if day >= 5 else 0
         is_peak = 1 if (7 <= hour <= 9 or 16 <= hour <= 19) else 0
         season = 0 if month in [12, 1, 2] else 1
-        
+
         # Build feature DataFrame
         df = pd.DataFrame([{
             "vehicle_id": vehicle_id,
@@ -287,22 +296,24 @@ def predict():
             "month": month,
             "season": season
         }])
-        
-        df["is_night"] = ((df["hour_of_day"] < 5) | (df["hour_of_day"] > 20)).astype(int)
-        df["load_per_passenger"] = df["passenger_load_kg"] / (df["passenger_count"] + 1)
-        
+
+        df["is_night"] = ((df["hour_of_day"] < 5) | (
+            df["hour_of_day"] > 20)).astype(int)
+        df["load_per_passenger"] = df["passenger_load_kg"] / \
+            (df["passenger_count"] + 1)
+
         # Encode categorical features
         for col in ["vehicle_id", "route_id", "direction", "location_name"]:
             df[col] = df[col].apply(lambda x: safe_encode(col, x))
-        
+
         # Predict safe speed
         if model is not None:
             safe_speed = float(model.predict(df)[0])
         else:
             safe_speed = 40.0  # Default fallback
-        
+
         safe_speed = round(safe_speed, 1)
-        
+
         # Prepare response data
         response_data = {
             "safe_speed": safe_speed,
@@ -312,11 +323,11 @@ def predict():
             "temperature": temp,
             "humidity": humidity
         }
-        
+
         # Store in database
         if db is not None:
             timestamp = now
-            
+
             # Update or insert bus record
             bus_data = {
                 "vehicle_id": vehicle_id,
@@ -334,25 +345,26 @@ def predict():
                 "last_update": timestamp,
                 "status": "online"
             }
-            
+
             buses_collection.update_one(
                 {"vehicle_id": vehicle_id},
                 {"$set": bus_data},
                 upsert=True
             )
-            
+
             # Store telemetry record
             telemetry_data = {
                 **bus_data,
                 "timestamp": timestamp
             }
             telemetry_collection.insert_one(telemetry_data)
-            
+
             # Emit WebSocket event for real-time updates
-            socketio.emit('bus_update', json.loads(json.dumps(bus_data, default=json_serializer)))
-        
+            socketio.emit('bus_update', json.loads(
+                json.dumps(bus_data, default=json_serializer)))
+
         return jsonify(response_data)
-        
+
     except Exception as e:
         logger.error(f"Prediction error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
@@ -375,36 +387,37 @@ def fleet_overview():
     """Get fleet overview statistics"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         # Get total buses
         total_buses = buses_collection.count_documents({})
-        
+
         # Get online buses (updated in last 30 seconds)
         online_threshold = datetime.now() - timedelta(seconds=30)
         online_buses = buses_collection.count_documents({
             "last_update": {"$gte": online_threshold}
         })
-        
+
         # Get offline buses
         offline_buses = total_buses - online_buses
-        
+
         # Get average speed
         avg_speed_result = list(buses_collection.aggregate([
             {"$group": {"_id": None, "avg_speed": {"$avg": "$safe_speed"}}}
         ]))
-        avg_speed = round(avg_speed_result[0]["avg_speed"], 1) if avg_speed_result else 0
-        
+        avg_speed = round(
+            avg_speed_result[0]["avg_speed"], 1) if avg_speed_result else 0
+
         # Get road condition summary
         wet_roads = buses_collection.count_documents({"road_condition": "Wet"})
         dry_roads = buses_collection.count_documents({"road_condition": "Dry"})
-        
+
         # Get total passengers
         total_passengers_result = list(buses_collection.aggregate([
             {"$group": {"_id": None, "total_passengers": {"$sum": "$passenger_count"}}}
         ]))
         total_passengers = total_passengers_result[0]["total_passengers"] if total_passengers_result else 0
-        
+
         return jsonify({
             "total_buses": total_buses,
             "online_buses": online_buses,
@@ -417,7 +430,7 @@ def fleet_overview():
             "total_passengers": total_passengers,
             "timestamp": datetime.now().isoformat()
         })
-        
+
     except Exception as e:
         logger.error(f"Fleet overview error: {e}")
         return jsonify({"error": "Failed to fetch fleet overview"}), 500
@@ -428,15 +441,16 @@ def get_all_buses():
     """Get list of all buses with current status"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         buses = list(buses_collection.find({}).sort("vehicle_id", 1))
-        
+
         online_threshold = datetime.now() - timedelta(seconds=30)
-        
+
         bus_list = []
         for bus in buses:
-            is_online = bus.get("last_update", datetime.min) >= online_threshold
+            is_online = bus.get(
+                "last_update", datetime.min) >= online_threshold
             bus_list.append({
                 "id": str(bus["_id"]),
                 "vehicle_id": bus.get("vehicle_id"),
@@ -454,9 +468,9 @@ def get_all_buses():
                 "last_update": bus.get("last_update").isoformat() if bus.get("last_update") else None,
                 "status": "online" if is_online else "offline"
             })
-        
+
         return jsonify({"buses": bus_list, "count": len(bus_list)})
-        
+
     except Exception as e:
         logger.error(f"Get buses error: {e}")
         return jsonify({"error": "Failed to fetch buses"}), 500
@@ -467,16 +481,16 @@ def get_bus_details(vehicle_id):
     """Get detailed information about a specific bus"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         bus = buses_collection.find_one({"vehicle_id": vehicle_id})
-        
+
         if not bus:
             return jsonify({"error": "Bus not found"}), 404
-        
+
         online_threshold = datetime.now() - timedelta(seconds=30)
         is_online = bus.get("last_update", datetime.min) >= online_threshold
-        
+
         return jsonify({
             "id": str(bus["_id"]),
             "vehicle_id": bus.get("vehicle_id"),
@@ -494,7 +508,7 @@ def get_bus_details(vehicle_id):
             "last_update": bus.get("last_update").isoformat() if bus.get("last_update") else None,
             "status": "online" if is_online else "offline"
         })
-        
+
     except Exception as e:
         logger.error(f"Get bus details error: {e}")
         return jsonify({"error": "Failed to fetch bus details"}), 500
@@ -505,19 +519,19 @@ def get_bus_history(vehicle_id):
     """Get telemetry history for a specific bus"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         # Get query parameters
         limit = int(request.args.get("limit", 100))
         hours = int(request.args.get("hours", 24))
-        
+
         time_threshold = datetime.now() - timedelta(hours=hours)
-        
+
         history = list(telemetry_collection.find({
             "vehicle_id": vehicle_id,
             "timestamp": {"$gte": time_threshold}
         }).sort("timestamp", -1).limit(limit))
-        
+
         history_list = []
         for record in history:
             history_list.append({
@@ -532,13 +546,13 @@ def get_bus_history(vehicle_id):
                 "temperature": record.get("temperature"),
                 "humidity": record.get("humidity")
             })
-        
+
         return jsonify({
             "vehicle_id": vehicle_id,
             "history": history_list,
             "count": len(history_list)
         })
-        
+
     except Exception as e:
         logger.error(f"Get bus history error: {e}")
         return jsonify({"error": "Failed to fetch bus history"}), 500
@@ -549,18 +563,19 @@ def get_map_data():
     """Get data for map visualization (all buses with coordinates)"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         buses = list(buses_collection.find({
             "latitude": {"$exists": True},
             "longitude": {"$exists": True}
         }))
-        
+
         online_threshold = datetime.now() - timedelta(seconds=30)
-        
+
         map_data = []
         for bus in buses:
-            is_online = bus.get("last_update", datetime.min) >= online_threshold
+            is_online = bus.get(
+                "last_update", datetime.min) >= online_threshold
             map_data.append({
                 "vehicle_id": bus.get("vehicle_id"),
                 "latitude": bus.get("latitude"),
@@ -572,9 +587,9 @@ def get_map_data():
                 "passenger_count": bus.get("passenger_count"),
                 "status": "online" if is_online else "offline"
             })
-        
+
         return jsonify({"buses": map_data, "count": len(map_data)})
-        
+
     except Exception as e:
         logger.error(f"Get map data error: {e}")
         return jsonify({"error": "Failed to fetch map data"}), 500
@@ -585,20 +600,21 @@ def get_routes():
     """Get all unique routes in the system"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         routes = buses_collection.distinct("route_id")
-        
+
         route_details = []
         for route_id in routes:
-            bus_count = buses_collection.count_documents({"route_id": route_id})
+            bus_count = buses_collection.count_documents(
+                {"route_id": route_id})
             route_details.append({
                 "route_id": route_id,
                 "bus_count": bus_count
             })
-        
+
         return jsonify({"routes": route_details, "count": len(route_details)})
-        
+
     except Exception as e:
         logger.error(f"Get routes error: {e}")
         return jsonify({"error": "Failed to fetch routes"}), 500
@@ -609,7 +625,7 @@ def get_statistics():
     """Get detailed fleet statistics"""
     if db is None:
         return jsonify({"error": "Database not available"}), 503
-    
+
     try:
         # Speed distribution
         speed_ranges = [
@@ -619,7 +635,7 @@ def get_statistics():
             {"label": "60-80 km/h", "min": 60, "max": 80},
             {"label": "80+ km/h", "min": 80, "max": 200}
         ]
-        
+
         speed_distribution = []
         for range_info in speed_ranges:
             count = buses_collection.count_documents({
@@ -629,7 +645,7 @@ def get_statistics():
                 "range": range_info["label"],
                 "count": count
             })
-        
+
         # Hourly telemetry count for today
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         hourly_data = list(telemetry_collection.aggregate([
@@ -641,13 +657,13 @@ def get_statistics():
             }},
             {"$sort": {"_id": 1}}
         ]))
-        
+
         return jsonify({
             "speed_distribution": speed_distribution,
             "hourly_telemetry": [{"hour": h["_id"], "count": h["count"], "avg_speed": round(h.get("avg_speed", 0), 1)} for h in hourly_data],
             "timestamp": datetime.now().isoformat()
         })
-        
+
     except Exception as e:
         logger.error(f"Get statistics error: {e}")
         return jsonify({"error": "Failed to fetch statistics"}), 500
@@ -686,7 +702,7 @@ def health_check():
     """Health check endpoint"""
     db_status = "connected" if db is not None else "disconnected"
     model_status = "loaded" if model is not None else "not loaded"
-    
+
     return jsonify({
         "status": "healthy",
         "database": db_status,

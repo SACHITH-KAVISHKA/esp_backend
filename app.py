@@ -35,7 +35,12 @@ MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "bus_speed_predict_api")
 
 try:
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongo_client = MongoClient(
+        MONGO_URI, 
+        serverSelectionTimeoutMS=5000,
+        tls=True,
+        tlsAllowInvalidCertificates=True
+    )
     mongo_client.server_info()  # Test connection
     db = mongo_client[DB_NAME]
     telemetry_collection = db["telemetry"]

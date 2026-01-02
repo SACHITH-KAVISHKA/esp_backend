@@ -3,6 +3,10 @@ Smart Bus Safe Speed Prediction & Fleet Management System
 Backend API Server with MongoDB Integration
 """
 
+# Monkey patch for eventlet MUST be at the very top before any other imports
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -33,7 +37,17 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', ping_timeout=60, ping_interval=25)
+# Use eventlet for production deployment with Gunicorn
+# eventlet workers are compatible with WebSockets and long-lived connections
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='eventlet',
+    ping_timeout=120,
+    ping_interval=25,
+    logger=True,
+    engineio_logger=False
+)
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("MONGO_URI")
@@ -750,5 +764,6 @@ def home():
 
 if __name__ == "__main__":
     logger.info("Starting Smart Bus Fleet Management System...")
-    # Enable threaded mode to handle concurrent requests from ESP32 and frontend
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+    # Use eventlet for production deployment with Gunicorn
+    # For production, use: gunicorn --worker-class eventlet -w 1 app:app
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False)

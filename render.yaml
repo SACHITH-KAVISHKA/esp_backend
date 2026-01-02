@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: safe-speed-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT --timeout 120 --keep-alive 5 --log-level info app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: MONGO_URI
+        sync: false
+      - key: DB_NAME
+        value: bus_speed_predict_api
+      - key: OPENWEATHER_API_KEY
+        sync: false

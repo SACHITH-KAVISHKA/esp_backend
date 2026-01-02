@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', ping_timeout=60, ping_interval=25)
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("MONGO_URI")
@@ -324,7 +324,8 @@ def predict():
             "humidity": humidity
         }
 
-        # Store in database
+        # Return response immediately to ESP32
+        # Database operations are done in background thread to avoid blocking
         if db is not None:
             timestamp = now
 
@@ -346,22 +347,31 @@ def predict():
                 "status": "online"
             }
 
-            buses_collection.update_one(
-                {"vehicle_id": vehicle_id},
-                {"$set": bus_data},
-                upsert=True
-            )
+            # Use background thread for database operations to not block ESP32 response
+            def store_data():
+                try:
+                    buses_collection.update_one(
+                        {"vehicle_id": vehicle_id},
+                        {"$set": bus_data},
+                        upsert=True
+                    )
 
-            # Store telemetry record
-            telemetry_data = {
-                **bus_data,
-                "timestamp": timestamp
-            }
-            telemetry_collection.insert_one(telemetry_data)
+                    # Store telemetry record
+                    telemetry_data = {
+                        **bus_data,
+                        "timestamp": timestamp
+                    }
+                    telemetry_collection.insert_one(telemetry_data)
 
-            # Emit WebSocket event for real-time updates
-            socketio.emit('bus_update', json.loads(
-                json.dumps(bus_data, default=json_serializer)))
+                    # Emit WebSocket event for real-time updates
+                    socketio.emit('bus_update', json.loads(
+                        json.dumps(bus_data, default=json_serializer)))
+                except Exception as e:
+                    logger.error(f"Background DB operation error: {e}")
+            
+            # Execute in background thread
+            import threading
+            threading.Thread(target=store_data, daemon=True).start()
 
         return jsonify(response_data)
 
@@ -740,4 +750,5 @@ def home():
 
 if __name__ == "__main__":
     logger.info("Starting Smart Bus Fleet Management System...")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    # Enable threaded mode to handle concurrent requests from ESP32 and frontend
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)

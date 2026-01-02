@@ -41,8 +41,7 @@ try:
         serverSelectionTimeoutMS=30000,
         connectTimeoutMS=30000,
         socketTimeoutMS=30000,
-        tlsCAFile=None,
-        ssl_cert_reqs=ssl.CERT_NONE
+        tlsAllowInvalidCertificates=True
     )
     mongo_client.server_info()  # Test connection
     db = mongo_client[DB_NAME]

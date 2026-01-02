@@ -1,5 +1,7 @@
 flask
 flask-cors
+flask-socketio
+pymongo
 pandas
 joblib
 scikit-learn
@@ -7,3 +9,4 @@ lightgbm
 gunicorn
 requests
 python-dotenv
+eventlet

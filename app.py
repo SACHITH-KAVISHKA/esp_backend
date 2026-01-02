@@ -1,4 +1,8 @@
 # Monkey patch for eventlet MUST be at the very top before any other imports
+import eventlet
+eventlet.monkey_patch()
+
+# Now import everything else AFTER monkey patching
 from pymongo.server_api import ServerApi
 import certifi
 import json
@@ -17,8 +21,6 @@ from pymongo import MongoClient
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from flask import Flask, request, jsonify
-import eventlet
-eventlet.monkey_patch()
 
 
 load_dotenv()
